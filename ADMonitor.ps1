@@ -1,20 +1,27 @@
 ﻿#Import activedirectory modules
-if ((Get-Module activedirectory) -eq $null)
+if ($null -eq (Get-Module activedirectory))
 {
     Import-Module activedirectory
 }
 
+if ($null -eq (Test-Path .\configData.xml))
+{
+    Write-Host "Please configData.xml file in the current directory." 
+    Break    
+}
+
+$config = Import-Clixml .\configData.xml
+
+$dateStr = (get-date).ToString("yyyyMMdd HH:mm:ss")
+
 #Security Groups to Monitor Variables
-$SecurityGroups = @(
-    "Domain Admins",
-    "Enterprise Admins"
-)
+$SecurityGroups = $config.securityGroups
 
 #Path variables:
-$path = ".\ADMonitor"
+$path = $config.Path
 if ((test-path $path ) -eq $FALSE)
 {
-    New-Item -ItemType Directory -name $path
+    mkdir $path.ToString()
 }
 
 
@@ -24,13 +31,22 @@ foreach ($securitygroup in $SecurityGroups)
     $newfile = "$path\new-ADMonitor_$securitygroup.txt"
     $oldfile = "$path\old-ADmonitor_$securitygroup.txt"
     $nestedSecGroups = Get-ADGroupMember  $securitygroup | `
-    where {$_.objectClass -eq "group"}
+        Where-Object {$_.objectClass -eq "group"}
     
     #new run
     Get-ADGroupMember  $securitygroup | `
-    where {$_.objectClass -eq "user"} | `
-    select -ExpandProperty name | `
-    Add-Content -Path $newfile
+        Where-Object {$_.objectClass -eq "user"} | `
+        Select-Object -ExpandProperty name | `
+        Add-Content -Path $newfile
+    if ($null -ne $nestedSecGroups)
+    {
+        foreach ($nestedSecGroup in $nestedSecGroups)
+        {
+            Get-ADGroupMember $securitygroup | `
+                Select-Object -ExpandProperty name | `
+                Add-Content -Path $newfile
+        }
+    }
 
     #Compare actions
     if ((test-path $oldfile) -eq $FALSE)
@@ -40,23 +56,34 @@ foreach ($securitygroup in $SecurityGroups)
     }
     else
     {
-         
         $comp = compare-object (Get-Content $newfile) (Get-Content $oldfile)
-        if ($comp -eq $null)
+        $groupschanged = $comp | `
+            Select-Object -ExpandProperty InputObject
+        if ($null -eq $comp)
         {
             out-null
         }
         elseif ($comp.SideIndicator -eq "<=")
-        {
-            #$securitygroup
-            "User's added to Security Group!" 
-            $comp | select -ExpandProperty InputObject
+        {   
+            $dateStr + " - User's added to security group - " + $securitygroup + " - " + $groupschanged | `
+                Add-Content $path\ADMonitor_LogFile.txt
+            $message = "User added to " + $securitygroup + ":`n" + ( $comp.InputObject | % { "$_`n" } )  
+            Send-MailMessage -From $config.Sender `
+                -to $config.Recipient `
+                -subject "User added to $securitygroup" `
+                -body $message `
+                -SmtpServer $config.SMTPRelay
         }
         elseif ($comp.SideIndicator -eq "=>")
         {
-            #$securitygroup
-            "User's removed from Security Group!"
-            $comp | select -ExpandProperty InputObject
+            $dateStr + " - User's removed from security group - " + $securitygroup + " - " + $groupschanged | `
+                Add-Content $path\ADMonitor_LogFile.txt
+            $message = "User removed from " + $securitygroup + ":`n" + ( $comp.InputObject | % { "$_`n" } )  
+            Send-MailMessage -From $config.Sender `
+                -to $config.Recipient `
+                -subject "User removed from $securitygroup" `
+                -body $message `
+                -SmtpServer $config.SMTPRelay
         }
         else
         {
@@ -64,5 +91,9 @@ foreach ($securitygroup in $SecurityGroups)
         }
         
     }
-    move-item $newfile $oldfile -Force
+    move-item $newfile $oldfile -Force -ErrorAction SilentlyContinue
+
 }
+
+$dateStr + " - script successfully ran." | `
+    Add-Content $path\ADMonitor_LogFile.txt
